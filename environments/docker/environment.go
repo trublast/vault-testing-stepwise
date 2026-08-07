@@ -28,22 +28,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	docker "github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-multierror"
 	uuid "github.com/hashicorp/go-uuid"
 	stepwise "github.com/hashicorp/vault-testing-stepwise"
 	"github.com/hashicorp/vault/api"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	docker "github.com/moby/moby/client"
 	"golang.org/x/net/http2"
 )
 
 var _ stepwise.Environment = (*DockerCluster)(nil)
-
-const dockerVersion = "1.40"
 
 // DockerCluster is used to managing the lifecycle of the test Vault cluster
 type DockerCluster struct {
@@ -94,11 +90,11 @@ func (dc *DockerCluster) Teardown() error {
 
 	// clean up networks
 	if dc.networkID != "" {
-		cli, err := docker.NewClientWithOpts(docker.FromEnv, docker.WithVersion(dockerVersion))
+		cli, err := docker.New(docker.FromEnv)
 		if err != nil {
 			return multierror.Append(result, err)
 		}
-		if err := cli.NetworkRemove(context.Background(), dc.networkID); err != nil {
+		if _, err := cli.NetworkRemove(context.Background(), dc.networkID, docker.NetworkRemoveOptions{}); err != nil {
 			return multierror.Append(result, err)
 		}
 	}
@@ -489,7 +485,7 @@ type dockerClusterNode struct {
 	TLSConfig         *tls.Config
 	WorkDir           string
 	Cluster           *DockerCluster
-	container         *types.ContainerJSON
+	container         *container.InspectResponse
 	dockerAPI         *docker.Client
 }
 
@@ -527,7 +523,8 @@ func (n *dockerClusterNode) NewAPIClient() (*api.Client, error) {
 func (n *dockerClusterNode) Cleanup() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return n.dockerAPI.ContainerKill(ctx, n.container.ID, "KILL")
+	_, err := n.dockerAPI.ContainerKill(ctx, n.container.ID, docker.ContainerKillOptions{Signal: "KILL"})
+	return err
 }
 
 func (n *dockerClusterNode) start(cli *docker.Client, caDir, netName string, netCIDR *dockerClusterNode, pluginBinPath string) error {
@@ -599,8 +596,11 @@ func (n *dockerClusterNode) start(cli *docker.Client, caDir, netName string, net
 				"VAULT_API_ADDR=https://127.0.0.1:8200",
 				fmt.Sprintf("VAULT_REDIRECT_ADDR=https://%s:8200", n.Name()),
 			},
-			Labels:       nil,
-			ExposedPorts: nat.PortSet{"8200/tcp": {}, "8201/tcp": {}},
+			Labels: nil,
+			ExposedPorts: network.PortSet{
+				network.MustParsePort("8200/tcp"): {},
+				network.MustParsePort("8201/tcp"): {},
+			},
 		},
 		ContainerName: n.Name(),
 		NetName:       netName,
@@ -612,11 +612,17 @@ func (n *dockerClusterNode) start(cli *docker.Client, caDir, netName string, net
 		return err
 	}
 
+	var ip net.IP
+	if n.container.NetworkSettings != nil {
+		if es := n.container.NetworkSettings.Networks[netName]; es != nil && es.IPAddress.IsValid() {
+			ip = net.IP(es.IPAddress.AsSlice())
+		}
+	}
 	n.Address = &net.TCPAddr{
-		IP:   net.ParseIP(n.container.NetworkSettings.IPAddress),
+		IP:   ip,
 		Port: 8200,
 	}
-	ports := n.container.NetworkSettings.NetworkSettingsBase.Ports[nat.Port("8200/tcp")]
+	ports := n.container.NetworkSettings.Ports[network.MustParsePort("8200/tcp")]
 	if len(ports) == 0 {
 		n.Cleanup()
 		return fmt.Errorf("could not find port binding for 8200/tcp")
@@ -740,7 +746,7 @@ func (cluster *DockerCluster) setupDockerCluster(opts *DockerClusterOptions) err
 		return err
 	}
 
-	cli, err := docker.NewClientWithOpts(docker.FromEnv, docker.WithVersion(dockerVersion))
+	cli, err := docker.New(docker.FromEnv)
 	if err != nil {
 		return err
 	}
@@ -788,7 +794,7 @@ func setupNetwork(cli *docker.Client, netName string) (string, error) {
 }
 
 func createNetwork(cli *docker.Client, netName string) (string, error) {
-	resp, err := cli.NetworkCreate(context.Background(), netName, network.CreateOptions{
+	resp, err := cli.NetworkCreate(context.Background(), netName, docker.NetworkCreateOptions{
 		Driver:  "bridge",
 		Options: map[string]string{},
 		IPAM: &network.IPAM{
