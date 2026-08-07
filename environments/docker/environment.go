@@ -31,11 +31,11 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-multierror"
 	uuid "github.com/hashicorp/go-uuid"
-	stepwise "github.com/hashicorp/vault-testing-stepwise"
 	"github.com/hashicorp/vault/api"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	docker "github.com/moby/moby/client"
+	stepwise "github.com/trublast/vault-testing-stepwise"
 	"golang.org/x/net/http2"
 )
 
